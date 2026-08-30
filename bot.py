@@ -1533,28 +1533,6 @@ async def _settle_auto_pending(bot, config: dict, channel_level: int | None) -> 
     return True
 
 
-# ── Auto post intro (signal မပို့ခင် တစ်ကြိမ် တင်ပေးမယ့် ပုံ + စာ) ─────────────
-AUTO_INTRO_PHOTO_URL = "https://i.ibb.co/mCnHxgQw/IMG-20260830-225006-102.png"
-AUTO_INTRO_TEXT = (
-    "ကဲ တီးလိုက်ကြရအောင်\n\n\n\n"
-    "Deposit ပေါ်မူတည်ပြီး\n\n\n\n"
-    "လိုက်ဆ ၈ကြိမ်ပြင်ပါ။"
-)
-
-
-async def _send_auto_intro(bot, targets) -> None:
-    """Auto post session တစ်ခုအတွက် signal မပို့ခင် intro ပုံကို တစ်ကြိမ်တင်ပါတယ်။"""
-    for chat_id, _item in targets:
-        try:
-            await bot.send_photo(
-                int(chat_id),
-                photo=AUTO_INTRO_PHOTO_URL,
-                caption=AUTO_INTRO_TEXT,
-            )
-        except Exception as error:
-            logger.warning("Auto intro post failed for %s: %s", chat_id, error)
-
-
 async def auto_post_job(context: ContextTypes.DEFAULT_TYPE):
     """Poll the configured public source and publish each new source post once."""
     config = load_channel_config()
@@ -1623,11 +1601,6 @@ async def auto_post_job(context: ContextTypes.DEFAULT_TYPE):
         "sent_at": datetime.now(timezone.utc).isoformat(),
     }
     save_channel_config(config)
-
-    if not config.get("auto_intro_sent"):
-        await _send_auto_intro(context.bot, targets)
-        config["auto_intro_sent"] = True
-        save_channel_config(config)
 
     for chat_id, _item in targets:
         try:
@@ -2207,8 +2180,6 @@ async def _handle_admin_cb(q, ctx: ContextTypes.DEFAULT_TYPE, data: str):
             await q.answer("အရင်ဆုံး Add Channel လုပ်ပါ။", show_alert=True)
             return
         config["auto_post"] = not config.get("auto_post", False)
-        # Auto post ကို အသစ်ပြန်ဖွင့်တိုင်း intro ပုံကို တစ်ကြိမ် ပြန်တင်ပါတယ်။
-        config["auto_intro_sent"] = False
         save_channel_config(config)
         await q.edit_message_text(
             admin_panel_text(), parse_mode=ParseMode.MARKDOWN, reply_markup=kb_admin()
