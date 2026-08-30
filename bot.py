@@ -97,14 +97,6 @@ SCHEDULE_TIME_CHOICES = [
 ]
 DEFAULT_START_TIME = "08:00"
 DEFAULT_CLOSE_TIME = "22:00"
-# Direct image URL resolved from the user's ibb.co share page. Telegram needs
-# the actual image URL, not the HTML share-page URL.
-PRE_SIGNAL_IMAGE_URL = "https://i.ibb.co/mCnHxgQw/IMG-20260830-225006-102.png"
-PRE_SIGNAL_CAPTION = (
-    "ကဲ တီးလိုက်ကြရအောင်\n\n"
-    "Deposit ပေါ်မူတည်ပြီး\n"
-    "လိုက်ဆ ၈ကြိမ်ပြင်ပါ။"
-)
 WIN_STK_FILE = DATA_DIR / "win_stickers.json"
 ROUND_SECONDS = 60
 RESULT_GRACE_SECONDS = 8
@@ -382,28 +374,14 @@ def load_channel_config() -> dict:
     try:
         data = json.loads(CHANNELS_FILE.read_text()) if CHANNELS_FILE.exists() else {}
         if not isinstance(data, dict):
-            return {
-                "channels": {},
-                "auto_post": False,
-                "last_source_timestamp": None,
-                "pre_signal_intro_sessions": {},
-            }
+            return {"channels": {}, "auto_post": False, "last_source_timestamp": None}
         data.setdefault("channels", {})
         data.setdefault("auto_post", False)
         data.setdefault("last_source_timestamp", None)
-        sessions = data.get("pre_signal_intro_sessions", {})
-        data["pre_signal_intro_sessions"] = (
-            sessions if isinstance(sessions, dict) else {}
-        )
         return data
     except Exception as error:
         logger.warning("Could not read auto-post configuration: %s", error)
-        return {
-            "channels": {},
-            "auto_post": False,
-            "last_source_timestamp": None,
-            "pre_signal_intro_sessions": {},
-        }
+        return {"channels": {}, "auto_post": False, "last_source_timestamp": None}
 
 
 def save_channel_config(data: dict):
@@ -979,13 +957,6 @@ def stats_text(user_id: int) -> str:
 
 def parse_transaction_from_text(text: str) -> str | None:
     cleaned = unescape(re.sub(r"<[^>]+>", " ", text or ""))
-    short_match = re.search(
-        r"\bTRX\s*[:#-]?\s*(\d+)",
-        cleaned,
-        flags=re.IGNORECASE,
-    )
-    if short_match:
-        return short_match.group(1)
     match = re.search(
         r"(?:TRANSACTION(?:\s+NO\.?)?|TXN|ROUND(?:\s+ID)?|PERIOD|ISSUE)"
         r"\s*[:#-]?\s*(\d{8,})",
@@ -1135,17 +1106,11 @@ async def track_round(bot, user_id: int, round_id: str, chat_id: int):
     await asyncio.sleep(RESULT_GRACE_SECONDS)
     await settle_round_now(bot, user_id, round_id, chat_id, announce_pending=True)
 
-def _normalize_signal_token(token: str) -> str:
-    return {"B": "BIG", "S": "SMALL"}.get(token.upper(), token.upper())
-
-
 def parse_signal_from_text(text: str) -> str | None:
     cleaned = unescape(re.sub(r"<[^>]+>", " ", text)).upper()
-    # Source posts may use full labels or the compact format:
-    # "TRX 94 S 100" / "TRX 96 B 300".
-    matches = re.findall(r"\b(BIG|SMALL|B|S)\b", cleaned)
+    matches = re.findall(r"\b(BIG|SMALL)\b", cleaned)
     if matches:
-        return _normalize_signal_token(matches[-1])
+        return matches[-1]
     return None
 
 def parse_signal_and_level_from_text(text: str) -> tuple[str | None, int | None]:
@@ -1156,10 +1121,10 @@ def parse_signal_and_level_from_text(text: str) -> tuple[str | None, int | None]
       - level > 1   → previous signal LOST (ladder moved up)
     """
     cleaned = unescape(re.sub(r"<[^>]+>", " ", text)).upper()
-    matches = re.findall(r"\b(BIG|SMALL|B|S)\b\s*\(\s*(\d+)\s*\)", cleaned)
+    matches = re.findall(r"\b(BIG|SMALL)\b\s*\(\s*(\d+)\s*\)", cleaned)
     if matches:
         direction, level = matches[-1]
-        return _normalize_signal_token(direction), int(level)
+        return direction, int(level)
     # Fall back to a bare BIG/SMALL with no level tag.
     return parse_signal_from_text(text), None
 
@@ -1203,7 +1168,7 @@ async def fetch_latest_public_channel_signal() -> str | None:
         posts = _parse_public_channel_posts(response.text)
         if not posts:
             logger.warning("No BIG/SMALL signal found in public channel preview")
-            return get_channel_signal()
+            return None
         post_time, source_signal, source_transaction, source_level = max(posts, key=lambda item: item[0])
         age_minutes = (datetime.now(timezone.utc) - post_time).total_seconds() / 60
         if age_minutes > CHANNEL_SIG_MAX_AGE_MIN:
@@ -1522,35 +1487,6 @@ async def _send_photo_retry(
             await asyncio.sleep(wait_seconds)
 
 
-async def _send_url_photo_retry(
-    bot,
-    chat_id: int,
-    image_url: str,
-    *,
-    caption: str,
-    parse_mode: str,
-):
-    """Send a public image URL with the same retry behavior as bot images."""
-    for attempt in range(1, 4):
-        try:
-            return await bot.send_photo(
-                chat_id,
-                photo=image_url,
-                caption=caption,
-                parse_mode=parse_mode,
-            )
-        except RetryAfter as e:
-            wait_seconds = min(max(1, int(e.retry_after)), 30)
-            logger.warning(f"Telegram rate limit; retrying in {wait_seconds}s")
-            await asyncio.sleep(wait_seconds)
-        except (NetworkError, TimedOut) as e:
-            if attempt == 3:
-                raise
-            wait_seconds = attempt * 2
-            logger.warning(f"Telegram temporary error ({e}); retrying in {wait_seconds}s")
-            await asyncio.sleep(wait_seconds)
-
-
 async def _send_text_retry(bot, chat_id: int, text: str, **kwargs):
     """Retry temporary Telegram/network failures for text responses too."""
     for attempt in range(1, 4):
@@ -1563,56 +1499,6 @@ async def _send_text_retry(bot, chat_id: int, text: str, **kwargs):
             if attempt == 3:
                 raise
             await asyncio.sleep(attempt * 2)
-
-
-def _schedule_session_key(now: datetime | None = None) -> str:
-    """Identify the current daily schedule window in Myanmar local time."""
-    start_time, close_time = get_schedule()
-    current = (now or datetime.now(timezone.utc)).astimezone(MYANMAR_TZ)
-    start_minutes = int(start_time[:2]) * 60 + int(start_time[3:])
-    close_minutes = int(close_time[:2]) * 60 + int(close_time[3:])
-    if start_minutes > close_minutes and (
-        current.hour * 60 + current.minute
-    ) < close_minutes:
-        current -= timedelta(days=1)
-    return f"{current.date().isoformat()}:{start_time}-{close_time}"
-
-
-async def _send_pre_signal_intro(bot, targets: list, config: dict):
-    """Post the intro once per schedule window, without toggle actions."""
-    try:
-        session_key = _schedule_session_key()
-        sessions = config.get("pre_signal_intro_sessions", {})
-        if not isinstance(sessions, dict):
-            sessions = {}
-    except Exception:
-        # An intro must never stop the actual signal from being published.
-        logger.exception("Could not prepare pre-signal intro state")
-        return
-    changed = False
-    for chat_id, _item in targets:
-        chat_key = str(chat_id)
-        if sessions.get(chat_key) == session_key:
-            continue
-        try:
-            await _send_url_photo_retry(
-                bot,
-                int(chat_id),
-                PRE_SIGNAL_IMAGE_URL,
-                caption=PRE_SIGNAL_CAPTION,
-                parse_mode=ParseMode.MARKDOWN,
-            )
-            sessions[chat_key] = session_key
-            changed = True
-        except Exception as error:
-            logger.warning("Could not send pre-signal intro to %s: %s", chat_id, error)
-    if changed:
-        config["pre_signal_intro_sessions"] = sessions
-        try:
-            save_channel_config(config)
-        except Exception:
-            # Telegram delivery succeeded; persistence can safely retry next round.
-            logger.exception("Could not save pre-signal intro state")
 
 
 async def _settle_auto_pending(bot, config: dict, channel_level: int | None) -> bool:
@@ -1647,6 +1533,28 @@ async def _settle_auto_pending(bot, config: dict, channel_level: int | None) -> 
     return True
 
 
+# ── Auto post intro (signal မပို့ခင် တစ်ကြိမ် တင်ပေးမယ့် ပုံ + စာ) ─────────────
+AUTO_INTRO_PHOTO_URL = "https://i.ibb.co/mCnHxgQw/IMG-20260830-225006-102.png"
+AUTO_INTRO_TEXT = (
+    "ကဲ တီးလိုက်ကြရအောင်\n\n\n\n"
+    "Deposit ပေါ်မူတည်ပြီး\n\n\n\n"
+    "လိုက်ဆ ၈ကြိမ်ပြင်ပါ။"
+)
+
+
+async def _send_auto_intro(bot, targets) -> None:
+    """Auto post session တစ်ခုအတွက် signal မပို့ခင် intro ပုံကို တစ်ကြိမ်တင်ပါတယ်။"""
+    for chat_id, _item in targets:
+        try:
+            await bot.send_photo(
+                int(chat_id),
+                photo=AUTO_INTRO_PHOTO_URL,
+                caption=AUTO_INTRO_TEXT,
+            )
+        except Exception as error:
+            logger.warning("Auto intro post failed for %s: %s", chat_id, error)
+
+
 async def auto_post_job(context: ContextTypes.DEFAULT_TYPE):
     """Poll the configured public source and publish each new source post once."""
     config = load_channel_config()
@@ -1658,18 +1566,6 @@ async def auto_post_job(context: ContextTypes.DEFAULT_TYPE):
     if signals_paused() or not schedule_is_open():
         return
 
-    targets = enabled_channels(config)
-    if not targets:
-        return
-
-    # Publish the intro as soon as the auto-post window is active. This does
-    # not depend on a new source post and therefore does not require toggling
-    # Auto Post off and on.
-    try:
-        await _send_pre_signal_intro(context.bot, targets, config)
-    except Exception:
-        logger.exception("Pre-signal intro failed; continuing with polling")
-
     source_signal = await fetch_latest_public_channel_signal()
     if not source_signal or not CHANNEL_SIG_FILE.exists():
         return
@@ -1679,6 +1575,10 @@ async def auto_post_job(context: ContextTypes.DEFAULT_TYPE):
         return
     source_timestamp = source_data.get("timestamp")
     if not source_timestamp or source_timestamp == config.get("last_source_timestamp"):
+        return
+
+    targets = enabled_channels(config)
+    if not targets:
         return
 
     channel_level = source_data.get("source_level")
@@ -1723,6 +1623,11 @@ async def auto_post_job(context: ContextTypes.DEFAULT_TYPE):
         "sent_at": datetime.now(timezone.utc).isoformat(),
     }
     save_channel_config(config)
+
+    if not config.get("auto_intro_sent"):
+        await _send_auto_intro(context.bot, targets)
+        config["auto_intro_sent"] = True
+        save_channel_config(config)
 
     for chat_id, _item in targets:
         try:
@@ -2302,6 +2207,8 @@ async def _handle_admin_cb(q, ctx: ContextTypes.DEFAULT_TYPE, data: str):
             await q.answer("အရင်ဆုံး Add Channel လုပ်ပါ။", show_alert=True)
             return
         config["auto_post"] = not config.get("auto_post", False)
+        # Auto post ကို အသစ်ပြန်ဖွင့်တိုင်း intro ပုံကို တစ်ကြိမ် ပြန်တင်ပါတယ်။
+        config["auto_intro_sent"] = False
         save_channel_config(config)
         await q.edit_message_text(
             admin_panel_text(), parse_mode=ParseMode.MARKDOWN, reply_markup=kb_admin()
