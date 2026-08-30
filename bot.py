@@ -1645,6 +1645,18 @@ async def auto_post_job(context: ContextTypes.DEFAULT_TYPE):
     if signals_paused() or not schedule_is_open():
         return
 
+    targets = enabled_channels(config)
+    if not targets:
+        return
+
+    # Publish the intro as soon as the auto-post window is active. This does
+    # not depend on a new source post and therefore does not require toggling
+    # Auto Post off and on.
+    try:
+        await _send_pre_signal_intro(context.bot, targets, config)
+    except Exception:
+        logger.exception("Pre-signal intro failed; continuing with polling")
+
     source_signal = await fetch_latest_public_channel_signal()
     if not source_signal or not CHANNEL_SIG_FILE.exists():
         return
@@ -1654,10 +1666,6 @@ async def auto_post_job(context: ContextTypes.DEFAULT_TYPE):
         return
     source_timestamp = source_data.get("timestamp")
     if not source_timestamp or source_timestamp == config.get("last_source_timestamp"):
-        return
-
-    targets = enabled_channels(config)
-    if not targets:
         return
 
     channel_level = source_data.get("source_level")
@@ -1693,11 +1701,6 @@ async def auto_post_job(context: ContextTypes.DEFAULT_TYPE):
     amount = current_bet()
     text = build_signal_text(transaction, output, amount)
 
-    # The intro is best-effort and must never block the actual signal.
-    try:
-        await _send_pre_signal_intro(context.bot, targets, config)
-    except Exception:
-        logger.exception("Pre-signal intro failed; continuing with signal")
     config["last_source_timestamp"] = source_timestamp
     config["auto_pending"] = {
         "transaction": transaction,
