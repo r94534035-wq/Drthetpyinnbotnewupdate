@@ -1567,10 +1567,15 @@ def _schedule_session_key(now: datetime | None = None) -> str:
 
 async def _send_pre_signal_intro(bot, targets: list, config: dict):
     """Post the intro once per schedule window, without toggle actions."""
-    session_key = _schedule_session_key()
-    sessions = config.get("pre_signal_intro_sessions", {})
-    if not isinstance(sessions, dict):
-        sessions = {}
+    try:
+        session_key = _schedule_session_key()
+        sessions = config.get("pre_signal_intro_sessions", {})
+        if not isinstance(sessions, dict):
+            sessions = {}
+    except Exception:
+        # An intro must never stop the actual signal from being published.
+        logger.exception("Could not prepare pre-signal intro state")
+        return
     changed = False
     for chat_id, _item in targets:
         chat_key = str(chat_id)
@@ -1590,7 +1595,11 @@ async def _send_pre_signal_intro(bot, targets: list, config: dict):
             logger.warning("Could not send pre-signal intro to %s: %s", chat_id, error)
     if changed:
         config["pre_signal_intro_sessions"] = sessions
-        save_channel_config(config)
+        try:
+            save_channel_config(config)
+        except Exception:
+            # Telegram delivery succeeded; persistence can safely retry next round.
+            logger.exception("Could not save pre-signal intro state")
 
 
 async def _settle_auto_pending(bot, config: dict, channel_level: int | None) -> bool:
@@ -1684,8 +1693,11 @@ async def auto_post_job(context: ContextTypes.DEFAULT_TYPE):
     amount = current_bet()
     text = build_signal_text(transaction, output, amount)
 
-    # The intro is sent once to each destination before the first signal.
-    await _send_pre_signal_intro(context.bot, targets, config)
+    # The intro is best-effort and must never block the actual signal.
+    try:
+        await _send_pre_signal_intro(context.bot, targets, config)
+    except Exception:
+        logger.exception("Pre-signal intro failed; continuing with signal")
     config["last_source_timestamp"] = source_timestamp
     config["auto_pending"] = {
         "transaction": transaction,
