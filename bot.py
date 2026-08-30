@@ -979,6 +979,13 @@ def stats_text(user_id: int) -> str:
 
 def parse_transaction_from_text(text: str) -> str | None:
     cleaned = unescape(re.sub(r"<[^>]+>", " ", text or ""))
+    short_match = re.search(
+        r"\bTRX\s*[:#-]?\s*(\d+)",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    if short_match:
+        return short_match.group(1)
     match = re.search(
         r"(?:TRANSACTION(?:\s+NO\.?)?|TXN|ROUND(?:\s+ID)?|PERIOD|ISSUE)"
         r"\s*[:#-]?\s*(\d{8,})",
@@ -1128,11 +1135,17 @@ async def track_round(bot, user_id: int, round_id: str, chat_id: int):
     await asyncio.sleep(RESULT_GRACE_SECONDS)
     await settle_round_now(bot, user_id, round_id, chat_id, announce_pending=True)
 
+def _normalize_signal_token(token: str) -> str:
+    return {"B": "BIG", "S": "SMALL"}.get(token.upper(), token.upper())
+
+
 def parse_signal_from_text(text: str) -> str | None:
     cleaned = unescape(re.sub(r"<[^>]+>", " ", text)).upper()
-    matches = re.findall(r"\b(BIG|SMALL)\b", cleaned)
+    # Source posts may use full labels or the compact format:
+    # "TRX 94 S 100" / "TRX 96 B 300".
+    matches = re.findall(r"\b(BIG|SMALL|B|S)\b", cleaned)
     if matches:
-        return matches[-1]
+        return _normalize_signal_token(matches[-1])
     return None
 
 def parse_signal_and_level_from_text(text: str) -> tuple[str | None, int | None]:
@@ -1143,10 +1156,10 @@ def parse_signal_and_level_from_text(text: str) -> tuple[str | None, int | None]
       - level > 1   → previous signal LOST (ladder moved up)
     """
     cleaned = unescape(re.sub(r"<[^>]+>", " ", text)).upper()
-    matches = re.findall(r"\b(BIG|SMALL)\b\s*\(\s*(\d+)\s*\)", cleaned)
+    matches = re.findall(r"\b(BIG|SMALL|B|S)\b\s*\(\s*(\d+)\s*\)", cleaned)
     if matches:
         direction, level = matches[-1]
-        return direction, int(level)
+        return _normalize_signal_token(direction), int(level)
     # Fall back to a bare BIG/SMALL with no level tag.
     return parse_signal_from_text(text), None
 
@@ -1190,7 +1203,7 @@ async def fetch_latest_public_channel_signal() -> str | None:
         posts = _parse_public_channel_posts(response.text)
         if not posts:
             logger.warning("No BIG/SMALL signal found in public channel preview")
-            return None
+            return get_channel_signal()
         post_time, source_signal, source_transaction, source_level = max(posts, key=lambda item: item[0])
         age_minutes = (datetime.now(timezone.utc) - post_time).total_seconds() / 60
         if age_minutes > CHANNEL_SIG_MAX_AGE_MIN:
