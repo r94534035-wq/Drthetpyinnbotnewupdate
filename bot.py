@@ -97,6 +97,14 @@ SCHEDULE_TIME_CHOICES = [
 ]
 DEFAULT_START_TIME = "08:00"
 DEFAULT_CLOSE_TIME = "22:00"
+# Direct image URL resolved from the user's ibb.co share page. Telegram needs
+# the actual image URL, not the HTML share-page URL.
+PRE_SIGNAL_IMAGE_URL = "https://i.ibb.co/mCnHxgQw/IMG-20260830-225006-102.png"
+PRE_SIGNAL_CAPTION = (
+    "ကဲ တီးလိုက်ကြရအောင်\n\n"
+    "Deposit ပေါ်မူတည်ပြီး\n"
+    "လိုက်ဆ ၈ကြိမ်ပြင်ပါ။"
+)
 WIN_STK_FILE = DATA_DIR / "win_stickers.json"
 ROUND_SECONDS = 60
 RESULT_GRACE_SECONDS = 8
@@ -374,14 +382,28 @@ def load_channel_config() -> dict:
     try:
         data = json.loads(CHANNELS_FILE.read_text()) if CHANNELS_FILE.exists() else {}
         if not isinstance(data, dict):
-            return {"channels": {}, "auto_post": False, "last_source_timestamp": None}
+            return {
+                "channels": {},
+                "auto_post": False,
+                "last_source_timestamp": None,
+                "pre_signal_intro_sessions": {},
+            }
         data.setdefault("channels", {})
         data.setdefault("auto_post", False)
         data.setdefault("last_source_timestamp", None)
+        sessions = data.get("pre_signal_intro_sessions", {})
+        data["pre_signal_intro_sessions"] = (
+            sessions if isinstance(sessions, dict) else {}
+        )
         return data
     except Exception as error:
         logger.warning("Could not read auto-post configuration: %s", error)
-        return {"channels": {}, "auto_post": False, "last_source_timestamp": None}
+        return {
+            "channels": {},
+            "auto_post": False,
+            "last_source_timestamp": None,
+            "pre_signal_intro_sessions": {},
+        }
 
 
 def save_channel_config(data: dict):
@@ -1487,6 +1509,35 @@ async def _send_photo_retry(
             await asyncio.sleep(wait_seconds)
 
 
+async def _send_url_photo_retry(
+    bot,
+    chat_id: int,
+    image_url: str,
+    *,
+    caption: str,
+    parse_mode: str,
+):
+    """Send a public image URL with the same retry behavior as bot images."""
+    for attempt in range(1, 4):
+        try:
+            return await bot.send_photo(
+                chat_id,
+                photo=image_url,
+                caption=caption,
+                parse_mode=parse_mode,
+            )
+        except RetryAfter as e:
+            wait_seconds = min(max(1, int(e.retry_after)), 30)
+            logger.warning(f"Telegram rate limit; retrying in {wait_seconds}s")
+            await asyncio.sleep(wait_seconds)
+        except (NetworkError, TimedOut) as e:
+            if attempt == 3:
+                raise
+            wait_seconds = attempt * 2
+            logger.warning(f"Telegram temporary error ({e}); retrying in {wait_seconds}s")
+            await asyncio.sleep(wait_seconds)
+
+
 async def _send_text_retry(bot, chat_id: int, text: str, **kwargs):
     """Retry temporary Telegram/network failures for text responses too."""
     for attempt in range(1, 4):
@@ -1499,6 +1550,47 @@ async def _send_text_retry(bot, chat_id: int, text: str, **kwargs):
             if attempt == 3:
                 raise
             await asyncio.sleep(attempt * 2)
+
+
+def _schedule_session_key(now: datetime | None = None) -> str:
+    """Identify the current daily schedule window in Myanmar local time."""
+    start_time, close_time = get_schedule()
+    current = (now or datetime.now(timezone.utc)).astimezone(MYANMAR_TZ)
+    start_minutes = int(start_time[:2]) * 60 + int(start_time[3:])
+    close_minutes = int(close_time[:2]) * 60 + int(close_time[3:])
+    if start_minutes > close_minutes and (
+        current.hour * 60 + current.minute
+    ) < close_minutes:
+        current -= timedelta(days=1)
+    return f"{current.date().isoformat()}:{start_time}-{close_time}"
+
+
+async def _send_pre_signal_intro(bot, targets: list, config: dict):
+    """Post the intro once per schedule window, without toggle actions."""
+    session_key = _schedule_session_key()
+    sessions = config.get("pre_signal_intro_sessions", {})
+    if not isinstance(sessions, dict):
+        sessions = {}
+    changed = False
+    for chat_id, _item in targets:
+        chat_key = str(chat_id)
+        if sessions.get(chat_key) == session_key:
+            continue
+        try:
+            await _send_url_photo_retry(
+                bot,
+                int(chat_id),
+                PRE_SIGNAL_IMAGE_URL,
+                caption=PRE_SIGNAL_CAPTION,
+                parse_mode=ParseMode.MARKDOWN,
+            )
+            sessions[chat_key] = session_key
+            changed = True
+        except Exception as error:
+            logger.warning("Could not send pre-signal intro to %s: %s", chat_id, error)
+    if changed:
+        config["pre_signal_intro_sessions"] = sessions
+        save_channel_config(config)
 
 
 async def _settle_auto_pending(bot, config: dict, channel_level: int | None) -> bool:
@@ -1592,6 +1684,8 @@ async def auto_post_job(context: ContextTypes.DEFAULT_TYPE):
     amount = current_bet()
     text = build_signal_text(transaction, output, amount)
 
+    # The intro is sent once to each destination before the first signal.
+    await _send_pre_signal_intro(context.bot, targets, config)
     config["last_source_timestamp"] = source_timestamp
     config["auto_pending"] = {
         "transaction": transaction,
