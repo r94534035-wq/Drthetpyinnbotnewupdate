@@ -98,6 +98,7 @@ SCHEDULE_TIME_CHOICES = [
 DEFAULT_START_TIME = "08:00"
 DEFAULT_CLOSE_TIME = "22:00"
 WIN_STK_FILE = DATA_DIR / "win_stickers.json"
+AUTO_INTRO_FILE = DATA_DIR / "auto_intro.json"
 ROUND_SECONDS = 60
 RESULT_GRACE_SECONDS = 8
 COUNTDOWN_UPDATE_SECONDS = 1
@@ -684,21 +685,34 @@ def add_win_sticker(file_id: str) -> int:
     if file_id not in items:
         items.append(file_id)
         save_win_stickers(items)
-    return len(items)
+    return len([item for item in items if isinstance(item, str)])
 
 
 def add_win_photo(file_id: str, caption: str = "") -> int:
-    """Add STK state မှာ admin ပို့လိုက်တဲ့ ပုံ+စာကို သိမ်းပါတယ် (signal မပို့ခင် intro အဖြစ် သုံးမယ်)။"""
-    items = load_win_stickers()
+    """Signal မပို့ခင်တင်မယ့် ပုံ+စာကို WIN stickers နဲ့ သီးခြားသိမ်းပါတယ်။"""
     entry = {"photo": file_id, "caption": caption or ""}
-    if entry not in items:
-        items.append(entry)
-        save_win_stickers(items)
-    return len(items)
+    temp = AUTO_INTRO_FILE.with_suffix(".tmp")
+    temp.write_text(json.dumps(entry, indent=2))
+    temp.replace(AUTO_INTRO_FILE)
+
+    # Previous version stored this photo inside win_stickers.json. Remove all
+    # such entries so the first real sticker remains WIN 1.
+    stickers = [item for item in load_win_stickers() if isinstance(item, str)]
+    save_win_stickers(stickers)
+    return 1
 
 
 def intro_photo_item() -> dict | None:
-    """Auto post signal မပို့ခင် အရင်တင်ပေးမယ့် ပုံ+စာ (ပထမဆုံး photo entry)။"""
+    """Auto post signal မပို့ခင် အရင်တင်ပေးမယ့် သီးခြားပုံ+စာ။"""
+    try:
+        if AUTO_INTRO_FILE.exists():
+            item = json.loads(AUTO_INTRO_FILE.read_text())
+            if isinstance(item, dict) and item.get("photo"):
+                return item
+    except Exception as error:
+        logger.warning("Could not read auto intro: %s", error)
+
+    # Backward compatibility for a photo saved by the previous version.
     for item in load_win_stickers():
         if isinstance(item, dict) and item.get("photo"):
             return item
@@ -1454,7 +1468,7 @@ def admin_panel_text() -> str:
         f"⏱ Cycle Time        : {mm_state.get('cycle_hours', DEFAULT_CYCLE_HOURS)}H\n"
         f"🗓 Schedule (MMT)    : {_schedule_label(start_time)} - {_schedule_label(close_time)}\n"
         f"⏸ Status            : {pause_label}\n"
-        f"🖼 Win STK Saved     : {len(load_win_stickers())}\n"
+        f"🖼 Win STK Saved     : {len([item for item in load_win_stickers() if isinstance(item, str)])}\n"
         f"🕐 Time (UTC)        : {now_utc}"
     )
 
@@ -1798,9 +1812,11 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if state == "admin_add_stk" and user.id in ADMIN_IDS:
         if text.lower() == "clear":
             save_win_stickers([])
+            if AUTO_INTRO_FILE.exists():
+                AUTO_INTRO_FILE.unlink()
             await update.message.reply_text("🗑 WIN STK အားလုံး ဖျက်ပြီးပါပြီ။", reply_markup=kb_back_admin())
         else:
-            next_no = len(load_win_stickers()) + 1
+            next_no = len([item for item in load_win_stickers() if isinstance(item, str)]) + 1
             await update.message.reply_text(
                 f"🖼 WIN {next_no} ← Sticker ကို sticker အနေနဲ့ ပို့ပေးပါ။\n"
                 "📷 Signal မပို့ခင် အရင်တင်ချင်တဲ့ ပုံ+စာကိုလည်း caption ပါပါတဲ့ photo အနေနဲ့ ဒီမှာပဲ ပို့နိုင်ပါတယ်။",
@@ -1845,11 +1861,11 @@ async def handle_admin_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not photo:
         return
     caption = (update.message.caption or "").strip()
-    total = add_win_photo(photo.file_id, caption)
+    add_win_photo(photo.file_id, caption)
     await update.message.reply_text(
-        f"✅ ပုံ + စာ သိမ်းပြီးပါပြီ။ (စုစုပေါင်း {total} ခု)\n"
+        "✅ Signal မပို့ခင်တင်မယ့် ပုံ + စာကို သီးခြားသိမ်းပြီးပါပြီ။\n"
         "📣 ဒီပုံက Auto Post မှာ signal မပို့ခင် အရင်ဆုံး တင်ပေးပါမယ်။\n"
-        "➡️ နောက်ထပ် sticker/ပုံ ဆက်ပို့နိုင်ပါတယ်၊ ပြီးရင် 🔙 Back နှိပ်ပါ။",
+        "🔙 Back နှိပ်ပြီး Add STK ကို ပြန်ဝင်ကာ WIN 1 sticker ကနေ စပို့ပါ။",
         reply_markup=kb_back_admin(),
     )
 
@@ -2132,10 +2148,11 @@ async def _handle_admin_cb(q, ctx: ContextTypes.DEFAULT_TYPE, data: str):
 
     elif data == "a_add_stk":
         ctx.user_data["state"] = "admin_add_stk"
-        next_no = len(load_win_stickers()) + 1
+        sticker_count = len([item for item in load_win_stickers() if isinstance(item, str)])
+        next_no = sticker_count + 1
         await q.edit_message_text(
             "🖼 *Add WIN STK*\n\n"
-            f"လက်ရှိ သိမ်းထားတဲ့ STK : *{len(load_win_stickers())}* ခု\n\n"
+            f"လက်ရှိ သိမ်းထားတဲ့ STK : *{sticker_count}* ခု\n\n"
             "Sticker တွေကို တစ်ခုပြီးတစ်ခု *sticker အနေနဲ့* ပို့ပေးပါ။\n"
             "ပို့တဲ့အစီအစဉ်အတိုင်း WIN 1, WIN 2, WIN 3, WIN 4, WIN 5 ... ဖြစ်ပါမယ်။\n\n"
             "📷 *Signal မပို့ခင် အရင်တင်မယ့် ပုံ+စာ* — ပုံကို caption (စာသား) ပါပါတဲ့ photo အနေနဲ့ ဒီမှာပို့ပါ။\n"
