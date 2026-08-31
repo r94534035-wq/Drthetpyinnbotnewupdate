@@ -687,9 +687,27 @@ def add_win_sticker(file_id: str) -> int:
     return len(items)
 
 
+def add_win_photo(file_id: str, caption: str = "") -> int:
+    """Add STK state မှာ admin ပို့လိုက်တဲ့ ပုံ+စာကို သိမ်းပါတယ် (signal မပို့ခင် intro အဖြစ် သုံးမယ်)။"""
+    items = load_win_stickers()
+    entry = {"photo": file_id, "caption": caption or ""}
+    if entry not in items:
+        items.append(entry)
+        save_win_stickers(items)
+    return len(items)
+
+
+def intro_photo_item() -> dict | None:
+    """Auto post signal မပို့ခင် အရင်တင်ပေးမယ့် ပုံ+စာ (ပထမဆုံး photo entry)။"""
+    for item in load_win_stickers():
+        if isinstance(item, dict) and item.get("photo"):
+            return item
+    return None
+
+
 def sticker_for_streak(streak: int) -> str | None:
     """WIN 1..N stickers — win number အတိုင်း (မရှိရင် နောက်ဆုံးတစ်ခု)။"""
-    items = load_win_stickers()
+    items = [x for x in load_win_stickers() if isinstance(x, str)]
     if not items or streak < 1:
         return None
     return items[min(streak, len(items)) - 1]
@@ -1543,13 +1561,19 @@ AUTO_INTRO_TEXT = (
 
 
 async def _send_auto_intro(bot, targets) -> None:
-    """Auto post session တစ်ခုအတွက် signal မပို့ခင် intro ပုံကို တစ်ကြိမ်တင်ပါတယ်။"""
+    """Auto post session တစ်ခုအတွက် signal မပို့ခင် intro ပုံကို တစ်ကြိမ်တင်ပါတယ်။
+
+    Add STK မှာ သိမ်းထားတဲ့ ပုံ+စာ (photo entry) ကို ဦးစားပေးသုံးပါတယ်။
+    မရှိသေးရင် default URL နဲ့ စာကို သုံးပါတယ်။"""
+    saved = intro_photo_item()
+    photo = saved["photo"] if saved else AUTO_INTRO_PHOTO_URL
+    caption = (saved.get("caption") or AUTO_INTRO_TEXT) if saved else AUTO_INTRO_TEXT
     for chat_id, _item in targets:
         try:
             await bot.send_photo(
                 int(chat_id),
-                photo=AUTO_INTRO_PHOTO_URL,
-                caption=AUTO_INTRO_TEXT,
+                photo=photo,
+                caption=caption,
             )
         except Exception as error:
             logger.warning("Auto intro post failed for %s: %s", chat_id, error)
@@ -1778,7 +1802,8 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         else:
             next_no = len(load_win_stickers()) + 1
             await update.message.reply_text(
-                f"🖼 WIN {next_no} ← Sticker ကို sticker အနေနဲ့ ပို့ပေးပါ (စာ/ပုံ မဟုတ်ပါ)။",
+                f"🖼 WIN {next_no} ← Sticker ကို sticker အနေနဲ့ ပို့ပေးပါ။\n"
+                "📷 Signal မပို့ခင် အရင်တင်ချင်တဲ့ ပုံ+စာကိုလည်း caption ပါပါတဲ့ photo အနေနဲ့ ဒီမှာပဲ ပို့နိုင်ပါတယ်။",
                 reply_markup=kb_back_admin(),
             )
         return
@@ -1807,15 +1832,24 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     )
 
 async def handle_admin_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """Admin accidentally sends a photo (not a sticker) while Add STK is active."""
+    """Add STK state မှာ admin ပို့လိုက်တဲ့ ပုံ (+caption စာ) ကို သိမ်းပါတယ်။
+
+    ဒီပုံက auto post မှာ signal မပို့ခင် အရင်ဆုံး တစ်ကြိမ် တင်ပေးမယ့်
+    intro ပုံ အဖြစ်သုံးပါတယ် (photo entry ပထမဆုံးတစ်ခု)။"""
     user = update.effective_user
     if not user or user.id not in ADMIN_IDS:
         return
     if ctx.user_data.get("state") != "admin_add_stk":
         return
-    next_no = len(load_win_stickers()) + 1
+    photo = update.message.photo[-1] if update.message.photo else None
+    if not photo:
+        return
+    caption = (update.message.caption or "").strip()
+    total = add_win_photo(photo.file_id, caption)
     await update.message.reply_text(
-        f"⚠️ ပုံ (photo) မဟုတ်ပဲ WIN {next_no} အတွက် Sticker ကိုသာ sticker အနေနဲ့ ပို့ပေးပါ။",
+        f"✅ ပုံ + စာ သိမ်းပြီးပါပြီ။ (စုစုပေါင်း {total} ခု)\n"
+        "📣 ဒီပုံက Auto Post မှာ signal မပို့ခင် အရင်ဆုံး တင်ပေးပါမယ်။\n"
+        "➡️ နောက်ထပ် sticker/ပုံ ဆက်ပို့နိုင်ပါတယ်၊ ပြီးရင် 🔙 Back နှိပ်ပါ။",
         reply_markup=kb_back_admin(),
     )
 
@@ -2102,8 +2136,10 @@ async def _handle_admin_cb(q, ctx: ContextTypes.DEFAULT_TYPE, data: str):
         await q.edit_message_text(
             "🖼 *Add WIN STK*\n\n"
             f"လက်ရှိ သိမ်းထားတဲ့ STK : *{len(load_win_stickers())}* ခု\n\n"
-            "Sticker တွေကို တစ်ခုပြီးတစ်ခု *sticker အနေနဲ့* ပို့ပေးပါ (ပုံ/photo မဟုတ်ပါ)။\n"
+            "Sticker တွေကို တစ်ခုပြီးတစ်ခု *sticker အနေနဲ့* ပို့ပေးပါ။\n"
             "ပို့တဲ့အစီအစဉ်အတိုင်း WIN 1, WIN 2, WIN 3, WIN 4, WIN 5 ... ဖြစ်ပါမယ်။\n\n"
+            "📷 *Signal မပို့ခင် အရင်တင်မယ့် ပုံ+စာ* — ပုံကို caption (စာသား) ပါပါတဲ့ photo အနေနဲ့ ဒီမှာပို့ပါ။\n"
+            "Auto Post စတင်တိုင်း အဲဒီပုံ+စာကို အရင်တင်ပေးပြီးမှ signal စပေးပါမယ်။\n\n"
             f"➡️ *WIN {next_no}* ← Sticker ကို အရင်ပို့ပါ။\n\n"
             "အကုန်ပြီးရင် 🔙 Back နှိပ်ပါ။\n"
             "အားလုံးဖျက်ချင်ရင် `clear` လို့ ရိုက်ပါ။",
